@@ -29,5 +29,4 @@ bash run.sh
 
 For Tiny-ImageNet experiments, please prepare the dataset first under the path `datasets/tiny-imagenet-200/`. 
 
-For more detailed settings of different datasets, please refer to the [supplementary material](https://arxiv.org/abs/2111.12229).
-
+For more detailed settings of different datasets, please refer to the supplementary material.
