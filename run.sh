@@ -1,4 +1,4 @@
-datasets=CIFAR10
+datasets=CIFAR10 # choises: [CIFAR10, CIFAR100, TinyImagenet]
 eps=8
 seed=0
 device=0

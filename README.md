@@ -3,6 +3,22 @@ Single-step adversarial training (AT) has received wide attention as it proved t
 
 
 
+## Dependencies
+
+Install other required dependencies:
+
+```
+pip install -r requirements.txt
+```
+
+We also evaluate the robustness with [Auto-Attack](https://github.com/fra31/auto-attack). It can be installed via following source code:
+
+```
+pip install git+https://github.com/fra31/auto-attack
+```
+
+
+
 ## How to run
 
 We show sample usages in `run.sh`:
