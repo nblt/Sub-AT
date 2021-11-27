@@ -5,7 +5,7 @@ Single-step adversarial training (AT) has received wide attention as it proved t
 
 ## Dependencies
 
-Install other required dependencies:
+Install required dependencies:
 
 ```
 pip install -r requirements.txt
@@ -26,4 +26,8 @@ We show sample usages in `run.sh`:
 ```
 bash run.sh
 ```
+
+For Tiny-ImageNet experiments, please prepare the dataset first under the path `datasets/tiny-imagenet-200/`. 
+
+For more detailed settings of different datasets, please refer to the [supplementary material](https://arxiv.org/abs/2111.12229).
 
