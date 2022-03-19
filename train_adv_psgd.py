@@ -1,7 +1,7 @@
 import argparse
 import os
-import shutil
 import time
+import sys
 
 import torch
 import torch.nn as nn
@@ -9,35 +9,21 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
 import torch.utils.data
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
 
 from sklearn.decomposition import PCA
-import matplotlib.pyplot as plt
 import numpy as np
-from numpy import linalg as LA
-import pickle
 import random
-import resnet
-from utils import get_datasets, get_model, epoch_adversarial, print_args, grad_align_loss, trades_loss, epoch_adversarial_PGD50, AutoAttack
+from utils import Logger, set_seed, get_datasets, get_model, print_args, epoch_adversarial, epoch_adversarial_PGD50
+from utils import AutoAttack, Guided_Attack, grad_align_loss, trades_loss
+import wandb
 
 from advertorch.attacks import LinfPGDAttack, L2PGDAttack
 from advertorch.context import ctx_noparamgrad
-from advertorch.utils import NormalizeByChannelMeanStd
 
-def set_seed(seed=233): 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-print ('P-SGD')
-
-parser = argparse.ArgumentParser(description='P(+)-SGD in pytorch')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
-                    help='model architecture (default: resnet32)')
+parser = argparse.ArgumentParser(description='Subspace Adversarial Training')
+parser.add_argument('--EXP', metavar='EXP', default='EXP', help='experiment name')
+parser.add_argument('--arch', '-a', metavar='ARCH', default='PreActResNet18',
+                    help='model architecture (default: PreActResNet18)')
 parser.add_argument('--datasets', metavar='DATASETS', default='CIFAR10', type=str,
                     help='The training datasets')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
@@ -56,31 +42,39 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
-parser.add_argument('--pretrained', dest='pretrained', action='store_true',
-                    help='use pre-trained model')
-parser.add_argument('--half', dest='half', action='store_true',
-                    help='use half-precision(16-bit) ')
 parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
                     default='save_temp', type=str)
-parser.add_argument('--save-every', dest='save_every',
-                    help='Saves checkpoints at every specified number of epochs',
-                    type=int, default=10)
-parser.add_argument('--n_components', default=40, type=int, metavar='N',
-                    help='n_components for PCA') 
-parser.add_argument('--params_start', default=0, type=int, metavar='N',
-                    help='which epoch start for PCA') 
-parser.add_argument('--params_end', default=51, type=int, metavar='N',
-                    help='which epoch end for PCA') 
-parser.add_argument('--lr', default=1, type=float, metavar='N',
-                    help='lr for PSGD') 
-parser.add_argument('--gamma', default=0.9, type=float, metavar='N',
-                    help='gamma for momentum')
+parser.add_argument('--log-dir', dest='log_dir',
+                    help='The directory used to save the log',
+                    default='save_temp', type=str)
+parser.add_argument('--log-name', dest='log_name',
+                    help='The log file name',
+                    default='log', type=str)
+parser.add_argument('--wandb', action='store_true', help='use wandb for online visualization')
 parser.add_argument('--randomseed', 
-                    help='Randomseed for training and initialization',
+                    help='Randomseed for initialization and training',
                     type=int, default=0)
 
+########################## Sub-AT setting ##########################
+parser.add_argument('--n_components', default=80, type=int, metavar='N',
+                    help='n_components for PCA') 
+parser.add_argument('--params_start', default=0, type=int, metavar='N',
+                    help='which idx starts for sampling') 
+parser.add_argument('--params_end', default=81, type=int, metavar='N',
+                    help='which idx ends for sampling') 
+parser.add_argument('--skip', action='store_true', help='skip for DLDR sampling')
+parser.add_argument('--lr', default=1, type=float, metavar='N',
+                    help='lr for Sub-AT') 
+
 ########################## attack setting ##########################
+adversary_names = ['Fast-AT', 'PGD', 'gradalign', 'GAT', 'trades']
+parser.add_argument('--attack', metavar='attack', default='Fast-AT',
+                    choices=adversary_names,
+                    help='adversary for genernating adversarial examples: ' + ' | '.join(adversary_names) +
+                    ' (default: Fast-AT)')
+
+# Fast-AT / PGD
 parser.add_argument('--norm', default='linf', type=str, help='linf or l2')
 parser.add_argument('--train_eps', default=8., type=float, help='epsilon of attack during training')
 parser.add_argument('--train_step', default=10, type=int, help='itertion number of attack during training')
@@ -91,16 +85,42 @@ parser.add_argument('--test_step', default=20, type=int, help='itertion number o
 parser.add_argument('--test_gamma', default=2., type=float, help='step size of attack during testing')
 parser.add_argument('--test_randinit', action='store_false', help='randinit usage flag (default: on)')
 
+# gradalign
+parser.add_argument('--gradalign_lambda', default=0.2, type=float, help='lambda for gradalign')
+# guideattack
+parser.add_argument('--GAT_lambda', default=10.0, type=float, help='lambda for GAT')
+# evaluate
 parser.add_argument('--pgd50',  action='store_true', help='evaluate the model with pgd50 (default: False)')
-parser.add_argument('--autoattack', '--aa', action='store_true', help='evaluate the model with AA')
-parser.add_argument('--gradalign', '--ga', action='store_true', help='gradalign term (default: False)')
-parser.add_argument('--glambda', default=0.2, type=float, help='lambda for gradalign')
-parser.add_argument('--tradeloss', '--trade', action='store_true', help='use tradeloss (default: False)')
-parser.add_argument('--lr_max', '--learning-rate-max', default=0.3, type=float,
-                    metavar='cLR', help='maximum learning rate for cyclic learning rates')
+parser.add_argument('--autoattack', '--aa', action='store_true', help='evaluate the model with AA (default: False)')
 
 args = parser.parse_args()
+
+# Check the save_dir exists or not
+print ('save dir:', args.save_dir)
+if not os.path.exists(args.save_dir):
+    os.makedirs(args.save_dir)
+
+# Check the log_dir exists or not
+print ('log dir:', args.log_dir)
+if not os.path.exists(args.log_dir):
+    os.makedirs(args.log_dir)
+
+sys.stdout = Logger(os.path.join(args.log_dir, args.log_name))
+if args.wandb:
+    print ('tracking with wandb!')
+    wandb.init(project="GuideAT", entity="nblt")
+    date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) 
+    wandb.run.name = args.EXP + date
+
 set_seed(args.randomseed)
+print_args(args)
+
+train_eps = args.train_eps
+args.train_eps /= 255.
+args.train_gamma /= 255.
+args.test_eps /= 255.
+args.test_gamma /= 255.
+
 best_robust = 0
 P = None
 
@@ -111,20 +131,6 @@ val_robust_loss = []
 test_natural_acc = []
 test_natural_loss = []
 arr_time = []
-
-print_args(args)
-
-
-if args.gradalign:
-    # Gradalign lambda for CIFAR-10
-    arr_lambda = [0, 0.03, 0.04, 0.05, 0.06, 0.08, 0.11, 0.15, 0.20, 0.27, 0.36, 0.47, 0.63, 0.84, 1.12, 1.50, 2.00]
-    args.glambda = arr_lambda[int(args.train_eps)]
-
-train_eps = args.train_eps
-args.train_eps /= 255.
-args.train_gamma /= 255.
-args.test_eps /= 255.
-args.test_gamma /= 255.
 
 def get_model_param_vec(model):
     """
@@ -154,25 +160,21 @@ def update_grad(model, grad_vec):
         idx += size
 
 def main():
-
     global args, best_robust, P, arr_time, train_eps
-
-    # Check the save_dir exists or not
-    print (args.save_dir)
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
     
     # Define model
     model = torch.nn.DataParallel(get_model(args))
     model.cuda()
 
+    cudnn.benchmark = True
+
+        
+    ################################ DLDR #######################################
     # Load sampled model parameters
     print ('params: from', args.params_start, 'to', args.params_end)
     W = []
     for i in range(args.params_start, args.params_end):
-        ############################################################################
-        # if i % 2 != 0: continue
-
+        if args.skip and i % 2 != 0: continue
         model.load_state_dict(torch.load(os.path.join(args.save_dir,  str(i) +  '.pt')))
         W.append(get_model_param_vec(model))
     W = np.array(W)
@@ -192,34 +194,50 @@ def main():
 
     # Prepare Dataloader
     train_loader, val_loader, test_loader = get_datasets(args)
-
     
     # Define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
-    if args.half:
-        model.half()
-        criterion.half()
-
-    cudnn.benchmark = True
 
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                        milestones=[50], last_epoch=args.start_epoch - 1)
+                                                        milestones=[40], last_epoch=args.start_epoch - 1)
+
+    # Optionally resume from a checkpoint
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print("=> loading checkpoint '{}'".format(args.resume))
+            checkpoint = torch.load(args.resume)
+            args.start_epoch = checkpoint['epoch']
+            print ('from ', args.start_epoch)
+            best_robust = checkpoint['best_robust']
+            optimizer = checkpoint['optimizer']
+            model.load_state_dict(checkpoint['state_dict'])
+            print("=> loaded checkpoint '{}' (epoch {})"
+                  .format(args.evaluate, checkpoint['epoch']))
+        else:
+            print("=> no checkpoint found at '{}'".format(args.resume))
 
     if args.evaluate:
-        validate(val_loader, model, criterion)
+        validate(test_loader, model, criterion)    
+        if args.pgd50:
+            epoch_adversarial_PGD50(test_loader, model)
+        if args.autoattack:
+            AutoAttack(model, args, dataset=args.datasets)
         return
 
     end = time.time()
 
+    ################################ Sub-AT #######################################
     is_best = 0
     print ('Start training: ', args.start_epoch, '->', args.epochs)
-    
-    print ('grad_algin:', args.gradalign)
-    if args.gradalign:
-        print ('lambda:', args.glambda)
 
-    print ('tradeloss:', args.tradeloss)
+    print ('adversary:', args.attack)
+    if args.attack == 'gradalign':
+        arr_lambda = [0, 0.03, 0.04, 0.05, 0.06, 0.08, 0.11, 0.15, 0.20, 0.27, 0.36, 0.47, 0.63, 0.84, 1.12, 1.50, 2.00]
+        args.gradalign_lambda = arr_lambda[int(args.train_eps)]
+        print ('gradalign lambda:', args.gradalign_lambda)
+    if args.attack == 'GAT':
+        print ('GAT_lambda:', args.GAT_lambda)
 
     nat_last5 = []
     rob_last5 = []
@@ -237,9 +255,6 @@ def main():
 
         torch.save(model.state_dict(), os.path.join(args.save_dir, 'train' + str(train_eps) + 'psgd_' + str(epoch) + '.pt'))
 
-        # if args.datasets == 'TinyImagenet':
-        #     continue
-
         # evaluate the adversarial robustness on validation set
         robust_acc, adv_loss = epoch_adversarial(val_loader, model, args)
         val_robust_acc.append(robust_acc)
@@ -249,6 +264,10 @@ def main():
         # remember best prec@1 and save checkpoint
         is_best = robust_acc > best_robust
         best_robust = max(robust_acc, best_robust)
+    
+        if args.wandb:
+            wandb.log({"test natural acc": natural_acc})
+            wandb.log({"test robust acc": robust_acc})
 
         if epoch + 5 >= args.epochs:
             nat_last5.append(natural_acc)        
@@ -257,8 +276,14 @@ def main():
             rob_last5.append(robust_acc)
 
         if is_best:
-            torch.save(model.state_dict(), os.path.join(args.save_dir, 'train' + str(train_eps) + 'psgd_best.pt'))
-
+            torch.save(model.state_dict(), os.path.join(args.save_dir, 'train_eps' + str(train_eps) + 'psgd_best.pt'))
+        
+        save_checkpoint({
+            'state_dict': model.state_dict(),
+            'best_robust': best_robust,
+            'epochs': epoch,
+            'optimizer': optimizer
+        }, filename=os.path.join(args.save_dir, 'psgd_model.th'))
 
     print ('train_robust_acc: ', train_robust_acc)
     print ('train_robust_loss: ', train_robust_loss)
@@ -267,32 +292,29 @@ def main():
     print ('test_natural_acc: ', test_natural_acc)
     print ('test_natural_loss: ', test_natural_loss)
     print ('total training time: ', np.sum(arr_time))    
-
-    print ('last:')
-    torch.save(model.state_dict(), os.path.join(args.save_dir, 'train' + str(train_eps) + 'psgd_last.pt'))
     print ('last 5 adv acc on test dataset:', np.mean(rob_last5))
     print ('last 5 nat acc on test dataset:', np.mean(nat_last5))
-
     del P
     torch.cuda.empty_cache()
+
+    print ('final:')
+    torch.save(model.state_dict(), os.path.join(args.save_dir, 'train_eps' + str(train_eps) + 'psgd_final.pt'))
     if args.pgd50:
         epoch_adversarial_PGD50(test_loader, model)
     if args.autoattack:
-        AutoAttack(model, dataset=args.datasets)
+        AutoAttack(model, args, dataset=args.datasets)
 
     print ('best:')
-    model.load_state_dict(torch.load(os.path.join(args.save_dir, 'train' + str(train_eps) + 'psgd_best.pt')))
+    model.load_state_dict(torch.load(os.path.join(args.save_dir, 'train_eps' + str(train_eps) + 'psgd_best.pt')))
     robust_acc, adv_loss = epoch_adversarial(test_loader, model, args)
     print ('best adv acc on test dataset:', robust_acc)
-    torch.cuda.empty_cache()
+
     if args.pgd50:
         epoch_adversarial_PGD50(test_loader, model)
     if args.autoattack:
-        AutoAttack(model, dataset=args.datasets)
-
+        AutoAttack(model, args, dataset=args.datasets)
     validate(test_loader, model, criterion)
 
-running_grad = 0
 
 def train(train_loader, model, criterion, optimizer, epoch):
     # Run one train epoch
@@ -328,10 +350,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
         target = target.cuda()
         input_var = input.cuda()
         target_var = target
-        if args.half:
-            input_var = input_var.half()
 
-        if args.tradeloss:
+        if args.attack == 'trades':
             # calculate robust loss
             output, loss = trades_loss(model=model,
                             x_natural=input_var,
@@ -341,6 +361,41 @@ def train(train_loader, model, criterion, optimizer, epoch):
                             epsilon=args.train_eps,
                             perturb_steps=args.train_step,
                             beta=6.0)
+
+        elif args.attack == 'GAT':
+            eps = args.train_eps
+            out  = model(input_var)
+            P_out = nn.Softmax(dim=1)(out)
+        
+            # input_adv = input_var + ((4./255.0)*torch.sign(torch.tensor([0.5]).cuda() - torch.rand_like(input_var).cuda()).cuda())
+            input_adv = input_var + (eps/2*torch.sign(torch.tensor([0.5]).cuda() - torch.rand_like(input_var).cuda()).cuda())
+            input_adv = torch.clamp(input_adv,0.0,1.0)       
+
+            model.eval()
+            input_adv = Guided_Attack(model,nn.CrossEntropyLoss(),input_adv,target,eps=eps,steps=1,P_out=P_out,l2_reg=10,alt=(i%2))
+
+            delta = input_adv - input_var
+            delta = torch.clamp(delta,-eps,eps)
+            input_adv = input_var+delta
+            input_adv = torch.clamp(input_adv,0.0,1.0)
+
+            model.train()
+            adv_out = model(input_adv)
+            out  = model(input_var)
+            
+            output = adv_out
+            
+            Q_out = nn.Softmax(dim=1)(adv_out)
+            P_out = nn.Softmax(dim=1)(out)
+        
+            '''LOSS COMPUTATION'''
+            
+            closs = criterion(out, target_var)
+            
+            reg_loss =  ((P_out - Q_out)**2.0).sum(1).mean(0)
+            
+            loss = 1.0*closs + 10.0*reg_loss
+
         else:
             #adv samples
             with ctx_noparamgrad(model):
@@ -350,7 +405,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
             output = model(input_adv)
             loss = criterion(output, target_var)
 
-            if args.gradalign:
+            if args.attack == 'gradalign':
                 loss += grad_align_loss(model, input_var, target_var, args)
 
         # Compute gradient and do SGD step
@@ -381,6 +436,9 @@ def train(train_loader, model, criterion, optimizer, epoch):
         
     train_robust_loss.append(losses.avg)
     train_robust_acc.append(top1.avg)
+    if args.wandb:
+        wandb.log({"train robust acc": top1.avg})
+        wandb.log({"train robust loss": losses.avg})
     arr_time.append(batch_time.sum)
 
 
@@ -415,9 +473,6 @@ def validate(val_loader, model, criterion):
             input_var = input.cuda()
             target_var = target.cuda()
 
-            if args.half:
-                input_var = input_var.half()
-
             # Compute output
             output = model(input_var)
             loss = criterion(output, target_var)
@@ -451,7 +506,7 @@ def validate(val_loader, model, criterion):
 
     return top1.avg
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+def save_checkpoint(state, filename='checkpoint.pth.tar'):
     # Save the training model
 
     torch.save(state, filename)
