@@ -2,6 +2,7 @@ import argparse
 import os
 import shutil
 import time
+import sys
 
 import torch
 import torch.nn as nn
@@ -9,6 +10,7 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
 import torch.utils.data
+from torch.autograd.gradcheck import zero_gradients
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
@@ -24,8 +26,6 @@ import numpy as np
 from numpy import linalg as LA
 import pickle
 import random
-import resnet
-import wideresnet
 
 from advertorch.attacks import LinfPGDAttack, L2PGDAttack
 from advertorch.context import ctx_noparamgrad
@@ -38,6 +38,37 @@ def get_model_param_vec(model):
         vec.append(param.detach().cpu().numpy().reshape(-1))
     return np.concatenate(vec, 0)
 
+class Logger(object):
+    def __init__(self,fileN ="Default.log"):
+        self.terminal = sys.stdout
+        self.log = open(fileN,"a")
+ 
+    def write(self,message):
+        self.terminal.write(message)
+        self.log.write(message)
+ 
+    def flush(self):
+        pass
+
+def set_seed(seed=1): 
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def print_args(args):
+    print ('batch size:', args.batch_size)
+    print ('Attack Norm:', args.norm)
+    print ('train eps: {} train step: {} train gamma: {} train randinit: {}'.format(args.train_eps, args.train_step, args.train_gamma, args.train_randinit))
+    print ('test eps: {} test step: {} test gamma: {} test randinit: {}'.format(args.test_eps, args.test_step, args.test_gamma, args.test_randinit))
+    print ('Model:', args.arch)
+    print ('Dataset:', args.datasets)
+
+
+
+################################ PGD attack #######################################
 def epoch_adversarial(loader, model, args, opt=None, **kwargs):
     """Adversarial training/evaluation epoch over the dataset"""
     total_loss, total_err = 0.,0.
@@ -133,13 +164,7 @@ def epoch_adversarial_PGD50(test_loader, model, epsilon=8):
 
     return 1 - total_err / len(test_loader.dataset)
 
-def print_args(args):
-    print ('Attack Norm:', args.norm)
-    print ('train eps: {} train step: {} train gamma: {} train randinit: {}'.format(args.train_eps, args.train_step, args.train_gamma, args.train_randinit))
-    print ('test eps: {} test step: {} test gamma: {} test randinit: {}'.format(args.test_eps, args.test_step, args.test_gamma, args.test_randinit))
-    print ('Model:', args.arch)
-    print ('Dataset:', args.datasets)
-
+################################ datasets #######################################
 def cifar10_dataloaders(batch_size=128, num_workers=2, data_dir='datasets/cifar10'):
 
     train_transform = transforms.Compose([
@@ -240,20 +265,18 @@ def get_model(args):
             mean=[0.4802, 0.4481, 0.3975], std=[0.2302, 0.2265, 0.2262])
     
     if args.arch == 'PreActResNet18':
+        import resnet
         net = resnet.__dict__[args.arch](num_classes=num_class)
 
     elif args.arch == 'WideResNet':
+        import wideresnet
         net = wideresnet.__dict__[args.arch](28, num_classes=num_class, widen_factor=10, dropRate=0.0)
-
-    elif args.arch == 'vgg16':
-        from vgg import vgg16_bn
-        net = vgg16_bn(num_class)
 
     net.normalize = dataset_normalization
     
     return net
 
-# GradAlign loss
+################################ GradAlign loss #######################################
 def get_uniform_delta(shape, eps, requires_grad=True):
     delta = torch.zeros(shape).cuda()
     delta.uniform_(-eps, eps)
@@ -286,7 +309,7 @@ def grad_align_loss(model, X, y, args):
     grad2 = get_input_grad(model, X, y,  args.train_eps, delta_init='random_uniform', backprop=True)
     grad1, grad2 = grad1.reshape(len(grad1), -1), grad2.reshape(len(grad2), -1)
     cos = torch.nn.functional.cosine_similarity(grad1, grad2, 1)
-    reg = args.glambda * (1.0 - cos.mean())
+    reg = args.gradalign_lambda * (1.0 - cos.mean())
 
     return reg
 
@@ -369,23 +392,9 @@ def trades_loss(model,
     loss = loss_natural + beta * loss_robust
     return model(x_adv), loss
 
-###########################################################################
-# penalty on gradient norm
-def penalty_on_grad_norm(model, inputs, target_var, criterion):
-    params = list(model.parameters())
-    output = model(inputs)
-    loss = criterion(output, target_var)
 
-    grad = autograd.grad(loss, inputs=params, create_graph=True)
-    grad_vec = torch.cat([g.contiguous().view(-1) for g in grad])
-    grad_penalty = torch.norm(grad_vec) ** 2
-
-    total_loss = loss + grad_penalty * 0.1
-
-    return output, total_loss
-
-
-def AutoAttack(model, dataset='CIFAR10', norm='Linf', epsilon=8):
+################################ AutoAttack #######################################
+def AutoAttack(model, args, dataset='CIFAR10', norm='Linf', epsilon=8):
     model.eval()
     print ('evaluate AA:', dataset, norm, epsilon)
     epsilon /= 255.
@@ -401,9 +410,26 @@ def AutoAttack(model, dataset='CIFAR10', norm='Linf', epsilon=8):
 
     # load attack    
     from autoattack import AutoAttack
-    adversary = AutoAttack(model, norm=norm, eps=epsilon, log_path='./log_file.txt',
+    adversary = AutoAttack(model, norm=norm, eps=epsilon, log_path=os.path.join(args.save_dir, 'log_file.txt'),
         version='standard')
 
     # run attack and save images
     with torch.no_grad():
         adv_complete = adversary.run_standard_evaluation(x_test, y_test, bs=1000)
+
+################################ Guided_Attack #######################################
+def Guided_Attack(model,loss,image,target,eps=8/255,bounds=[0,1],steps=1,P_out=[],l2_reg=10,alt=1): 
+    tar = Variable(target.cuda())
+    img = image.cuda()
+    eps = eps/steps 
+    for step in range(steps):
+        img = Variable(img,requires_grad=True)
+        zero_gradients(img) 
+        out  = model(img)
+        R_out = nn.Softmax(dim=1)(out)
+        cost = loss(out,tar) + alt*l2_reg*(((P_out - R_out)**2.0).sum(1)).mean(0) 
+        cost.backward()
+        per = eps * torch.sign(img.grad.data)
+        adv = img.data + per.cuda() 
+        img = torch.clamp(adv,bounds[0],bounds[1])
+    return img
