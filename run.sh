@@ -5,27 +5,62 @@ device=0
 
 for model in PreActResNet18
 do
-    
-    # single-step fast AT
-    CUDA_VISIBLE_DEVICES=$device python -u train_adv.py --randomseed $seed  --datasets $datasets --lr 0.1 --train_eps $eps --test_eps $eps --train_step 1 --test_step 20 --train_gamma 10 --test_gamma 2 --wd 0.0005 --arch=$model --epochs=200  --save-dir=fastfgsm_save_seed$seed\_$model\_$datasets\_eps$eps |& tee -a new_seed$seed\_fastfgsm_log_$model\_$datasets\_$eps
-    
-    # single-step fast Sub-AT
-    CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py  --datasets $datasets --lr 1  --train_eps 8 --test_eps $eps --train_step 1 --test_step 20 --train_gamma 10 --test_gamma 2  --params_start 0 --params_end 131  --batch-size 128  --n_components 80 --arch=$model --epochs=40  --save-dir=fastfgsm_save_seed$seed\_$model\_$datasets\_eps$eps |& tee -a fastfgsm_seed$seed\_log_$model\_$datasets\_$eps\_psgd
-    
-    # single-step fast Sub-AT (with a larger training radius)
-    CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py  --datasets $datasets --lr 1  --train_eps 12 --test_eps $eps --train_step 1 --test_step 20 --train_gamma 15 --test_gamma 2  --params_start 0 --params_end 131  --batch-size 128  --n_components 80 --arch=$model --epochs=40  --save-dir=fastfgsm_save_seed$seed\_$model\_$datasets\_eps$eps |& tee -a fastfgsm_seed$seed\_log_$model\_$datasets\_$eps\_psgd
-    CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py  --datasets $datasets --lr 1  --train_eps 16 --test_eps $eps --train_step 1 --test_step 20 --train_gamma 20 --test_gamma 2  --params_start 0 --params_end 131  --batch-size 128  --n_components 80 --arch=$model --epochs=40  --save-dir=fastfgsm_save_seed$seed\_$model\_$datasets\_eps$eps |& tee -a fastfgsm_seed$seed\_log_$model\_$datasets\_$eps\_psgd
+    # Fast AT (200 epochs)
+    EXP=$model\_$datasets\_FastAT
+    DST=new_results/$EXP
+    CUDA_VISIBLE_DEVICES=$device python -u train_adv.py --pgd50 \
+        --datasets $datasets --attack Fast-AT  --randomseed $seed \
+        --train_eps $eps --test_eps $eps --train_step 1 --test_step 20 \
+        --train_gamma 10 --test_gamma 2 --arch=$model \
+        --epochs=200  --save-dir=$DST/models --log-dir=$DST --EXP $EXP
 
-    #-------------------------------------------------------------#
-    # multi-step PGD AT
-    # CUDA_VISIBLE_DEVICES=$device python -u train_adv.py --randomseed $seed --datasets $datasets --lr 0.1 --train_eps $eps --test_eps $eps  --wd 0.0005 --arch=$model --epochs=200  --save-dir=pgd10_save_seed$seed\_$model\_$datasets\_eps$eps |& tee -a pgd10_seed$seed\_log_$model\_$datasets\_$eps
+    # Fast Sub-AT (DLDR: 65 epochs; Sub-AT: 40 epochs)
+    # We suggest use weight decay of 5e-4 instead of 1e-4 (our original setting) for better performance. [1]
+    EXP=$model\_$datasets\_Fast_SubAT
+    DST=new_results/$EXP
+    CUDA_VISIBLE_DEVICES=$device python -u train_adv.py --pgd50  --wandb\
+        --datasets $datasets --attack Fast-AT  --randomseed $seed \
+        --train_eps $eps --test_eps $eps --train_step 1 --test_step 20 \
+        --train_gamma 10 --test_gamma 2 --wd 0.0005 --arch=$model \
+        --epochs=65  --save-dir=$DST/models --log-dir=$DST --EXP $EXP
+
+    CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py --autoattack \
+        --datasets $datasets --lr 1 --attack Fast-AT \
+        --train_eps 16 --test_eps $eps --train_step 1 --test_step 20 --train_gamma 20 --test_gamma 2  \
+        --params_start 0 --params_end 131  --batch-size 128  --n_components 80 \
+        --arch=$model --epochs=40  --save-dir=$DST/models --log-dir=$DST --log-name=PSGD
     
-    # multi-step PGD Sub-AT
-    # CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py  --datasets $datasets --lr 1  --train_eps $eps --test_eps $eps  --params_start 0 --params_end 200  --batch-size 128  --n_components 120 --arch=$model --epochs=40  --save-dir=pgd10_save_seed$seed\_$model\_$datasets\_eps$eps |& tee -a pgd10_seed$seed\_log_$model\_$datasets\_$eps\_psgd
-    
-    # single-step fast Sub-AT (with a larger training radius)
-    # CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py  --datasets $datasets --lr 1  --train_eps 12 --test_eps $eps --train_step 1 --test_step 20 --train_gamma 15 --test_gamma 2  --params_start 0 --params_end 131  --batch-size 128  --n_components 80 --arch=$model --epochs=40  --save-dir=pgd10_save_seed$seed\_$model\_$datasets\_eps$eps |& tee -a fastfgsm_seed$seed\_log_$model\_$datasets\_$eps\_psgd
-    # CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py  --datasets $datasets --lr 1  --train_eps 16 --test_eps $eps --train_step 1 --test_step 20 --train_gamma 20 --test_gamma 2  --params_start 0 --params_end 131  --batch-size 128  --n_components 80 --arch=$model --epochs=40  --save-dir=pgd10_save_seed$seed\_$model\_$datasets\_eps$eps |& tee -a fastfgsm_seed$seed\_log_$model\_$datasets\_$eps\_psgd
-    
-    
+    # GAT experiments
+    EXP=$model\_$datasets\_GAT_SubAT
+    DST=new_results/$EXP
+    CUDA_VISIBLE_DEVICES=$device python -u train_adv.py --pgd50 --evaluate \
+        --datasets $datasets --attack GAT   \
+        --train_eps $eps --test_eps $eps --train_step 10 --test_step 20 \
+        --train_gamma 2 --test_gamma 2 --wd 0.0005 --arch=$model \
+        --epochs=200  --save-dir=$DST/models --log-dir=$DST
+
+    CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py --pgd50  \
+        --datasets $datasets --lr 1 --attack GAT \
+        --train_eps 8 --test_eps $eps --train_step 1 --test_step 20 --train_gamma 10 --test_gamma 2  \
+        --params_start 0 --params_end 201  --batch-size 128  --n_components 100 \
+        --arch=$model --epochs=40  --save-dir=$DST/models --log-dir=$DST
+
+    # PGD-AT (DLDR: 100 epochs; Sub-AT: 40 epochs)
+    # We suggest use weight decay of 5e-4 instead of 1e-4 (our original setting) for better performance. [1]
+    EXP=$model\_$datasets\_PGD_SubAT
+    DST=new_results/$EXP
+    CUDA_VISIBLE_DEVICES=$device python -u train_adv.py --pgd50  --wandb\
+        --datasets $datasets --attack PGD  --randomseed $seed \
+        --train_eps $eps --test_eps $eps --train_step 10 --test_step 20 \
+        --train_gamma 2 --test_gamma 2 --wd 0.0005 --arch=$model \
+        --epochs=100  --save-dir=$DST/models --log-dir=$DST --EXP $EXP
+
+    CUDA_VISIBLE_DEVICES=$device python -u train_adv_psgd.py --autoattack \
+        --datasets $datasets --lr 1 --attack PGD \
+        --train_eps 16 --test_eps $eps --train_step 1 --test_step 20 --train_gamma 20 --test_gamma 2  \
+        --params_start 0 --params_end 201  --batch-size 128  --n_components 100 \
+        --arch=$model --epochs=40  --save-dir=$DST/models --log-dir=$DST --log-name=PSGD
+
 done    
+
+# [1] Pang et al., Bag of Tricks for Adversarial Training, ICLR 2021
