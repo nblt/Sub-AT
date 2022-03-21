@@ -108,7 +108,7 @@ if not os.path.exists(args.log_dir):
 sys.stdout = Logger(os.path.join(args.log_dir, args.log_name))
 if args.wandb:
     print ('tracking with wandb!')
-    wandb.init(project="GuideAT", entity="nblt")
+    wandb.init(project="Sub-AT", entity="nblt")
     date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) 
     wandb.run.name = args.EXP + date
 
