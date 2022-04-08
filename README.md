@@ -4,7 +4,7 @@
 
 **Paper:** http://arxiv.org/abs/2111.12229
 
-**CVPR 2022**
+**CVPR 2022 oral**
 
 ## Abstract
 
