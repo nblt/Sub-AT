@@ -150,13 +150,14 @@ def get_model_grad_vec(model):
     return torch.cat(vec, 0)
 
 def update_grad(model, grad_vec):
+    """
+    Update model grad
+    """
     idx = 0
     for name,param in model.named_parameters():
         arr_shape = param.grad.shape
-        size = 1
-        for i in range(len(list(arr_shape))):
-            size *= arr_shape[i]
-        param.grad.data = grad_vec[idx:idx+size].reshape(arr_shape)
+        size = arr_shape.numel()
+        param.grad.data = grad_vec[idx:idx+size].reshape(arr_shape).clone()
         idx += size
 
 def main():
