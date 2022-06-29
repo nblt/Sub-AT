@@ -39,3 +39,15 @@ bash run.sh
 For Tiny-ImageNet experiments, please prepare the dataset first under the path `datasets/tiny-imagenet-200/`. 
 
 For more detailed settings of different datasets, please refer to the supplementary material.
+
+
+## Citation
+```
+@inproceedings{li2022subspace,
+  title={Subspace Adversarial Training},
+  author={Li, Tao and Wu, Yingwen and Chen, Sizhe and Fang, Kun and Huang, Xiaolin},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  pages={13409--13418},
+  year={2022}
+}
+```
