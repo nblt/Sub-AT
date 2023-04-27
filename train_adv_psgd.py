@@ -444,12 +444,11 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
 
 def P_SGD(model, optimizer, grad):
-    # P_plus_BFGS algorithm
+    # Project the gradient onto the subspace and do SGD step
 
     gk = torch.mm(P, grad.reshape(-1,1))
 
     grad_proj = torch.mm(P.transpose(0, 1), gk)
-    # grad_res = grad - grad_proj.reshape(-1)
 
     # Update the model grad and do a step
     update_grad(model, grad_proj)
